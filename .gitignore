@@ -1,0 +1,23 @@
+# Environment / secrets
+konnect.env
+*.env
+!*.env.example
+
+# TLS certificates and keys
+kongctl/certs/*.crt
+kongctl/certs/*.key
+kongctl/certs/*.pem
+kongctl/certs/*.p12
+
+# kafkactl config (may contain credentials)
+.kafkactl.yml
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Logs
+*.log

@@ -1,0 +1,124 @@
+# ============================================================
+# Phase 3 — Auth at the Gateway
+#
+# What this adds (on top of phase-2):
+#   - SASL/PLAIN authentication for Wealth Management LA
+#   - mediation: terminate  →  credentials stop at the gateway;
+#     Kafka never sees them
+#   - Retail Banking stays anonymous (branch systems use
+#     network-layer certificate auth)
+#
+# Apply:
+#   kongctl apply -f kongctl/phase-3-auth.yaml
+# ============================================================
+
+_defaults:
+  kongctl:
+    namespace: northwind
+
+event_gateways:
+  - ref: northwind-event-gateway
+    name: northwind-event-gateway
+    description: Northwind Financial MQ Environment
+
+    backend_clusters:
+      - ref: Northwind-Core-Event-Hub
+        name: Northwind-Core-Event-Hub
+        authentication:
+          type: anonymous
+        bootstrap_servers:
+          - kafka1:9092
+          - kafka2:9092
+          - kafka3:9092
+        tls:
+          enabled: false
+        insecure_allow_anonymous_virtual_cluster_auth: true
+
+    listeners:
+      - ref: retail-banking-ny-listener
+        name: retail-banking-ny-listener
+        addresses: ["0.0.0.0"]
+        ports: ["19192-19290"]
+        policies:
+          - ref: forward-to-retail-banking-ny
+            type: forward_to_virtual_cluster
+            name: forward-to-retail-banking-ny
+            config:
+              type: port_mapping
+              destination:
+                id: !ref retail-banking-ny
+              advertised_host: localhost
+              bootstrap_port: none
+              min_broker_id: 0
+
+      - ref: wealth-management-la-listener
+        name: wealth-management-la-listener
+        addresses: ["0.0.0.0"]
+        ports: ["19292-19390"]
+        policies:
+          - ref: forward-to-wealth-management-la
+            type: forward_to_virtual_cluster
+            name: forward-to-wealth-management-la
+            config:
+              type: port_mapping
+              destination:
+                id: !ref wealth-management-la
+              advertised_host: localhost
+              bootstrap_port: none
+              min_broker_id: 0
+
+    virtual_clusters:
+      - ref: retail-banking-ny
+        name: retail-banking-ny
+        destination:
+          id: !ref Northwind-Core-Event-Hub
+        acl_mode: passthrough
+        dns_label: retail-banking-ny
+        labels:
+          env: production
+          location: new-york
+          segment: retail-banking
+        namespace:
+          mode: hide_prefix
+          prefix: "RETAIL_NY."
+          additional:
+            topics:
+              - type: exact_list
+                exact_list:
+                  - backend: nw.analytics.forecasting.market-weather.v1
+              - type: glob
+                glob: "infosec.security.*"
+        # Retail branch systems rely on network-level access control
+        authentication:
+          - type: anonymous
+
+      - ref: wealth-management-la
+        name: wealth-management-la
+        destination:
+          id: !ref Northwind-Core-Event-Hub
+        acl_mode: passthrough
+        dns_label: wealth-management-la
+        labels:
+          env: production
+          location: los-angeles
+          segment: wealth-management
+        namespace:
+          mode: hide_prefix
+          prefix: "WEALTH_LA."
+          additional:
+            topics:
+              - type: exact_list
+                exact_list:
+                  - backend: nw.analytics.forecasting.market-weather.v1
+              - type: glob
+                glob: "infosec.security.*"
+        authentication:
+          # Internal wealth systems can still connect anonymously
+          - type: anonymous
+          # Advisors authenticate with SASL/PLAIN — terminated at the gateway
+          # Kafka never sees these credentials
+          - type: sasl_plain
+            mediation: terminate
+            principals:
+              - username: wealth-advisors
+                password: secret

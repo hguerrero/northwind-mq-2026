@@ -1,0 +1,86 @@
+# ============================================================
+# Phase 1 — Backend Cluster Registration + Passthrough Access
+#
+# What this does:
+#   Registers the Northwind internal Kafka cluster with the
+#   Event Gateway and exposes it via a single flat virtual
+#   cluster. No namespaces, no auth, no policies — just the
+#   gateway in front of Kafka as a transparent proxy.
+#
+#   A listener + virtual cluster are required for the gateway
+#   to serve traffic; this is the minimal viable configuration.
+#
+# Apply:
+#   kongctl apply -f kongctl/phase-1-backend-only.yaml
+# ============================================================
+
+_defaults:
+  kongctl:
+    namespace: northwind
+
+event_gateways:
+  - ref: northwind-event-gateway
+    name: northwind-event-gateway
+    description: Northwind Financial MQ Environment
+
+    backend_clusters:
+      - ref: Northwind-Core-Event-Hub
+        name: Northwind-Core-Event-Hub
+        description: >-
+          Central event hub for Northwind Financial. Aggregates account,
+          payments, and risk event streams across retail, wealth, and
+          enterprise banking domains.
+        labels:
+          env: production
+          role: source
+          tier: core
+          clearance: maximum
+        authentication:
+          type: anonymous
+        bootstrap_servers:
+          - kafka1:9092
+          - kafka2:9092
+          - kafka3:9092
+        tls:
+          enabled: false
+        # The gateway is the only trusted client; Kafka can stay anonymous internally
+        insecure_allow_anonymous_virtual_cluster_auth: true
+
+    listeners:
+      # Single passthrough listener — all traffic enters on 19092–19190
+      - ref: core-listener
+        name: core-listener
+        addresses:
+          - "0.0.0.0"
+        ports:
+          - "19092-19190"
+        policies:
+          - ref: forward-to-northwind-core
+            type: forward_to_virtual_cluster
+            name: forward-to-northwind-core
+            config:
+              type: port_mapping
+              destination:
+                id: !ref Northwind-Core
+              advertised_host: localhost
+              bootstrap_port: none
+              min_broker_id: 0
+
+    virtual_clusters:
+      # Flat passthrough — no namespace, no auth, no ACLs
+      # Clients connect to localhost:19092 and see all topics as-is
+      - ref: Northwind-Core
+        name: Northwind-Core
+        description: >-
+          Flat passthrough virtual cluster. Exposes all backend topics
+          without transformation. Used to establish the gateway perimeter
+          before tenant isolation is introduced in phase 2.
+        destination:
+          id: !ref Northwind-Core-Event-Hub
+        acl_mode: passthrough
+        dns_label: northwind-core
+        labels:
+          env: production
+          tier: core
+        authentication:
+          - type: anonymous

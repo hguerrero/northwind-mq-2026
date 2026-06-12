@@ -1,0 +1,215 @@
+# ============================================================
+# Phase 4 — Gateway-Enforced ACLs
+#
+# What this adds (on top of phase-3):
+#   - acl_mode: enforce_on_gateway on both virtual clusters
+#   - Retail: deny infosec.security.* for all connections
+#   - Wealth (non-advisors): deny infosec.security.*
+#   - Wealth (wealth-advisors): allow everything incl. infosec
+#   - Conditional policy evaluation via context.auth.principal.name
+#
+# Apply:
+#   kongctl apply -f kongctl/phase-4-acls.yaml
+# ============================================================
+
+_defaults:
+  kongctl:
+    namespace: northwind
+
+event_gateways:
+  - ref: northwind-event-gateway
+    name: northwind-event-gateway
+    description: Northwind Financial MQ Environment
+
+    backend_clusters:
+      - ref: Northwind-Core-Event-Hub
+        name: Northwind-Core-Event-Hub
+        authentication:
+          type: anonymous
+        bootstrap_servers:
+          - kafka1:9092
+          - kafka2:9092
+          - kafka3:9092
+        tls:
+          enabled: false
+        insecure_allow_anonymous_virtual_cluster_auth: true
+
+    listeners:
+      - ref: retail-banking-ny-listener
+        name: retail-banking-ny-listener
+        addresses: ["0.0.0.0"]
+        ports: ["19192-19290"]
+        policies:
+          - ref: forward-to-retail-banking-ny
+            type: forward_to_virtual_cluster
+            name: forward-to-retail-banking-ny
+            config:
+              type: port_mapping
+              destination:
+                id: !ref retail-banking-ny
+              advertised_host: localhost
+              bootstrap_port: none
+              min_broker_id: 0
+
+      - ref: wealth-management-la-listener
+        name: wealth-management-la-listener
+        addresses: ["0.0.0.0"]
+        ports: ["19292-19390"]
+        policies:
+          - ref: forward-to-wealth-management-la
+            type: forward_to_virtual_cluster
+            name: forward-to-wealth-management-la
+            config:
+              type: port_mapping
+              destination:
+                id: !ref wealth-management-la
+              advertised_host: localhost
+              bootstrap_port: none
+              min_broker_id: 0
+
+    virtual_clusters:
+      # ------------------------------------------------------------------
+      # Retail_Banking_NY — ACLs enforced at the gateway
+      # ------------------------------------------------------------------
+      - ref: retail-banking-ny
+        name: retail-banking-ny
+        destination:
+          id: !ref Northwind-Core-Event-Hub
+        acl_mode: enforce_on_gateway    # ← Kafka no longer evaluates ACLs for this VC
+        dns_label: retail-banking-ny
+        labels:
+          env: production
+          location: new-york
+          segment: retail-banking
+        namespace:
+          mode: hide_prefix
+          prefix: "RETAIL_NY."
+          additional:
+            topics:
+              - type: exact_list
+                exact_list:
+                  - backend: nw.analytics.forecasting.market-weather.v1
+              - type: glob
+                glob: "infosec.security.*"
+        authentication:
+          - type: anonymous
+        cluster_policies:
+          - ref: acl-retail-banking-ny
+            type: acls
+            name: acl-retail-banking-ny
+            description: Retail Banking NY — deny infosec topics for all connections
+            config:
+              rules:
+                # Default allow all topics
+                - action: allow
+                  resource_type: topic
+                  operations:
+                    - name: describe
+                    - name: read
+                    - name: write
+                  resource_names:
+                    - match: "*"
+                # Retail never gets infosec signals — only the fraud/risk team does
+                - action: deny
+                  resource_type: topic
+                  operations:
+                    - name: describe
+                    - name: read
+                    - name: write
+                  resource_names:
+                    - match: "infosec.security.*"
+                # Consumer groups unrestricted
+                - action: allow
+                  resource_type: group
+                  operations:
+                    - name: describe
+                    - name: read
+                    - name: write
+                    - name: create
+                  resource_names:
+                    - match: "*"
+
+      # ------------------------------------------------------------------
+      # Wealth_Management_LA — two conditional ACL policies
+      # Policy evaluation order: most specific condition wins
+      # ------------------------------------------------------------------
+      - ref: wealth-management-la
+        name: wealth-management-la
+        destination:
+          id: !ref Northwind-Core-Event-Hub
+        acl_mode: enforce_on_gateway
+        dns_label: wealth-management-la
+        labels:
+          env: production
+          location: los-angeles
+          segment: wealth-management
+        namespace:
+          mode: hide_prefix
+          prefix: "WEALTH_LA."
+          additional:
+            topics:
+              - type: exact_list
+                exact_list:
+                  - backend: nw.analytics.forecasting.market-weather.v1
+              - type: glob
+                glob: "infosec.security.*"
+        authentication:
+          - type: anonymous
+          - type: sasl_plain
+            mediation: terminate
+            principals:
+              - username: wealth-advisors
+                password: secret
+        cluster_policies:
+          # Policy for all non-advisor principals (anonymous internal systems)
+          - ref: acl-wealth-management-la
+            type: acls
+            name: acl-wealth-management-la
+            description: Default policy — deny infosec topics for non-advisors
+            condition: "context.auth.principal.name != 'wealth-advisors'"
+            config:
+              rules:
+                - action: allow
+                  resource_type: topic
+                  operations:
+                    - name: describe
+                    - name: read
+                    - name: write
+                  resource_names:
+                    - match: "*"
+                # Non-advisors cannot access fraud risk signals
+                - action: deny
+                  resource_type: topic
+                  operations:
+                    - name: describe
+                    - name: read
+                    - name: write
+                  resource_names:
+                    - match: "infosec.security.*"
+
+          # Policy for the wealth-advisors principal only
+          # condition references the authenticated principal name from SASL/PLAIN
+          - ref: acl-wealth-management-la-advisors
+            type: acls
+            name: acl-wealth-management-la-advisors
+            description: Wealth advisor policy — full access including infosec topics
+            condition: "context.auth.principal.name == 'wealth-advisors'"
+            config:
+              rules:
+                - action: allow
+                  resource_type: topic
+                  operations:
+                    - name: describe
+                    - name: read
+                    - name: write
+                  resource_names:
+                    - match: "*"
+                - action: allow
+                  resource_type: group
+                  operations:
+                    - name: describe
+                    - name: read
+                    - name: write
+                    - name: create
+                  resource_names:
+                    - match: "*"

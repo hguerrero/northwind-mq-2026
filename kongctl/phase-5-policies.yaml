@@ -1,0 +1,304 @@
+# ============================================================
+# Phase 5 — Produce/Consume Policies: Schema Validation + Encryption
+#
+# What this adds (on top of phase-4):
+#   - Schema registry registration (Apicurio in Confluent-compat mode)
+#   - Produce policy: schema validation on fraud risk scores (Wealth LA)
+#   - Static encryption key for wire transfer payloads
+#   - Produce policy: encrypt wire transfer values (Payment Rail Core)
+#   - Consume policy: decrypt wire transfer values (Payment Rail Core)
+#   - Payment Rail Core listener + virtual cluster (passthrough ACL mode)
+#
+# Required env vars:
+#   TRANSACTION_ENCRYPTION_KEY  — base64-encoded 32-byte key
+#   export TRANSACTION_ENCRYPTION_KEY=$(openssl rand -base64 32)
+#
+# Apply:
+#   kongctl apply -f kongctl/phase-5-policies.yaml
+# ============================================================
+
+_defaults:
+  kongctl:
+    namespace: northwind
+
+event_gateways:
+  - ref: northwind-event-gateway
+    name: northwind-event-gateway
+    description: Northwind Financial MQ Environment
+
+    backend_clusters:
+      - ref: Northwind-Core-Event-Hub
+        name: Northwind-Core-Event-Hub
+        authentication:
+          type: anonymous
+        bootstrap_servers:
+          - kafka1:9092
+          - kafka2:9092
+          - kafka3:9092
+        tls:
+          enabled: false
+        insecure_allow_anonymous_virtual_cluster_auth: true
+
+    # ------------------------------------------------------------------
+    # Encryption key — loaded from environment, never hardcoded
+    # ------------------------------------------------------------------
+    static_keys:
+      - ref: transaction-encryption-key
+        name: transaction_encryption_key
+        description: Encryption key for high-value wire transfer events
+        value: !env TRANSACTION_ENCRYPTION_KEY
+
+    # ------------------------------------------------------------------
+    # Schema Registry — Apicurio in Confluent-compatible mode
+    # ------------------------------------------------------------------
+    schema_registries:
+      - ref: apicurio-schema-registry
+        type: confluent
+        name: Apicurio Schema Registry Compatibility Mode
+        description: >-
+          Confluent-compatible schema registry interface powered by Apicurio.
+          Central schema governance for all Northwind event streams.
+        labels:
+          env: production
+          role: schema-registry
+          tier: core
+        config:
+          schema_type: json
+          endpoint: http://apicurio-registry:8080/apis/ccompat/v7
+          timeout_seconds: 8
+
+    listeners:
+      - ref: retail-banking-ny-listener
+        name: retail-banking-ny-listener
+        addresses: ["0.0.0.0"]
+        ports: ["19192-19290"]
+        policies:
+          - ref: forward-to-retail-banking-ny
+            type: forward_to_virtual_cluster
+            name: forward-to-retail-banking-ny
+            config:
+              type: port_mapping
+              destination:
+                id: !ref retail-banking-ny
+              advertised_host: localhost
+              bootstrap_port: none
+              min_broker_id: 0
+
+      - ref: wealth-management-la-listener
+        name: wealth-management-la-listener
+        addresses: ["0.0.0.0"]
+        ports: ["19292-19390"]
+        policies:
+          - ref: forward-to-wealth-management-la
+            type: forward_to_virtual_cluster
+            name: forward-to-wealth-management-la
+            config:
+              type: port_mapping
+              destination:
+                id: !ref wealth-management-la
+              advertised_host: localhost
+              bootstrap_port: none
+              min_broker_id: 0
+
+      # Payment Rail Core listener — ports 19092–19190
+      - ref: payment-rail-core-listener
+        name: payment-rail-core-listener
+        addresses: ["0.0.0.0"]
+        ports: ["19092-19190"]
+        policies:
+          - ref: forward-to-payment-rail-core
+            type: forward_to_virtual_cluster
+            name: forward-to-payment-rail-core
+            config:
+              type: port_mapping
+              destination:
+                id: !ref payment-rail-core
+              advertised_host: localhost
+              bootstrap_port: none
+              min_broker_id: 0
+
+    virtual_clusters:
+      - ref: retail-banking-ny
+        name: retail-banking-ny
+        destination:
+          id: !ref Northwind-Core-Event-Hub
+        acl_mode: enforce_on_gateway
+        dns_label: retail-banking-ny
+        namespace:
+          mode: hide_prefix
+          prefix: "RETAIL_NY."
+          additional:
+            topics:
+              - type: exact_list
+                exact_list:
+                  - backend: nw.analytics.forecasting.market-weather.v1
+              - type: glob
+                glob: "infosec.security.*"
+        authentication:
+          - type: anonymous
+        cluster_policies:
+          - ref: acl-retail-banking-ny
+            type: acls
+            name: acl-retail-banking-ny
+            config:
+              rules:
+                - action: allow
+                  resource_type: topic
+                  operations:
+                    - name: describe
+                    - name: read
+                    - name: write
+                  resource_names:
+                    - match: "*"
+                - action: deny
+                  resource_type: topic
+                  operations:
+                    - name: describe
+                    - name: read
+                    - name: write
+                  resource_names:
+                    - match: "infosec.security.*"
+                - action: allow
+                  resource_type: group
+                  operations:
+                    - name: describe
+                    - name: read
+                    - name: write
+                    - name: create
+                  resource_names:
+                    - match: "*"
+
+      - ref: wealth-management-la
+        name: wealth-management-la
+        destination:
+          id: !ref Northwind-Core-Event-Hub
+        acl_mode: enforce_on_gateway
+        dns_label: wealth-management-la
+        namespace:
+          mode: hide_prefix
+          prefix: "WEALTH_LA."
+          additional:
+            topics:
+              - type: exact_list
+                exact_list:
+                  - backend: nw.analytics.forecasting.market-weather.v1
+              - type: glob
+                glob: "infosec.security.*"
+        authentication:
+          - type: anonymous
+          - type: sasl_plain
+            mediation: terminate
+            principals:
+              - username: wealth-advisors
+                password: secret
+        cluster_policies:
+          - ref: acl-wealth-management-la
+            type: acls
+            name: acl-wealth-management-la
+            condition: "context.auth.principal.name != 'wealth-advisors'"
+            config:
+              rules:
+                - action: allow
+                  resource_type: topic
+                  operations:
+                    - name: describe
+                    - name: read
+                    - name: write
+                  resource_names:
+                    - match: "*"
+                - action: deny
+                  resource_type: topic
+                  operations:
+                    - name: describe
+                    - name: read
+                    - name: write
+                  resource_names:
+                    - match: "infosec.security.*"
+          - ref: acl-wealth-management-la-advisors
+            type: acls
+            name: acl-wealth-management-la-advisors
+            condition: "context.auth.principal.name == 'wealth-advisors'"
+            config:
+              rules:
+                - action: allow
+                  resource_type: topic
+                  operations:
+                    - name: describe
+                    - name: read
+                    - name: write
+                  resource_names:
+                    - match: "*"
+
+        # ------------------------------------------------------------------
+        # Schema validation — rejects non-conformant fraud risk score events
+        # Condition: only fires on the fraud risk scores topic
+        # ------------------------------------------------------------------
+        produce_policies:
+          - ref: fraud-risk-produce-schema-validation
+            type: schema_validation
+            name: fraud-risk-produce-schema-validation
+            description: >-
+              Enforces schema validation on fraud risk score produce requests.
+              Rejects non-conformant payloads before they reach the broker.
+            enabled: true
+            condition: "context.topic.name == 'infosec.security.fraud.risk-scores.v3'"
+            labels:
+              env: production
+              role: schema-validation
+              tier: policy
+            config:
+              type: confluent_schema_registry
+              schema_registry:
+                id: !ref apicurio-schema-registry
+              value_validation_action: reject
+
+      # ------------------------------------------------------------------
+      # Payment_Rail_Core — encrypt produce, decrypt consume
+      # ACL mode passthrough: Kafka manages its own ACLs for this cluster
+      # ------------------------------------------------------------------
+      - ref: payment-rail-core
+        name: payment-rail-core
+        description: >-
+          Core payment rail — interbank settlement, treasury movement, clearing.
+          Highest operational controls. Wire transfer values encrypted at rest.
+        destination:
+          id: !ref Northwind-Core-Event-Hub
+        acl_mode: passthrough
+        dns_label: payment-rail-core
+        labels:
+          env: production
+          location: primary-datacenter
+          tier: core
+          clearance: maximum
+        authentication:
+          - type: anonymous
+
+        produce_policies:
+          - ref: wire-transfer-encryption-policy
+            type: encrypt
+            name: wire-transfer-encryption-policy
+            description: Encrypts high-value wire transfer event values before they reach the broker
+            condition: 'context.topic.name == "nw.ledger.transactions.high-value-wire-transfers.v1"'
+            config:
+              failure_mode: error       # Reject the produce if encryption fails
+              part_of_record:
+                - value                 # Encrypt the message value; key/headers stay plaintext
+              encryption_key:
+                type: static
+                key:
+                  id: !ref transaction-encryption-key
+
+        consume_policies:
+          - ref: wire-transfer-decryption-policy
+            type: decrypt
+            name: wire-transfer-decryption-policy
+            description: Decrypts high-value wire transfer events transparently for authorised consumers
+            condition: 'context.topic.name == "nw.ledger.transactions.high-value-wire-transfers.v1"'
+            config:
+              failure_mode: error
+              part_of_record:
+                - value
+              key_sources:
+                - type: static
+                  key:
+                    id: !ref transaction-encryption-key

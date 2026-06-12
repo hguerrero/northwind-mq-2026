@@ -1,0 +1,32 @@
+# ============================================================================
+# Data Plane Certificate
+# Migrated from: keg_data_plane.tf
+#
+# NOTE: Certificate generation (tls_private_key + tls_self_signed_cert) was
+# handled by Terraform. With kongctl, you must generate the certificate
+# externally and place it at kongctl/certs/tls.crt before applying.
+#
+# Generate a self-signed certificate with:
+#
+#   openssl req -new -x509 -nodes -newkey rsa:2048 \
+#     -subj "/CN=event-gateway/C=US" \
+#     -keyout event-gateway/kongctl/certs/key.crt \
+#     -out  event-gateway/kongctl/certs/tls.crt
+#
+# The private key (key.crt) is only needed by the data plane process itself
+# and does NOT need to be uploaded to Konnect — only tls.crt is submitted.
+# ============================================================================
+
+_defaults:
+  kongctl:
+    namespace: northwind
+
+event_gateways:
+  - ref: northwind-event-gateway
+    name: northwind-event-gateway
+    data_plane_certificates:
+      - ref: keg-data-plane-cert
+        name: KEG Data Plane Certificate
+        # !file path is relative to this config file.
+        # Run the openssl command above before applying.
+        certificate: !file ./certs/tls.crt
