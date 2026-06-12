@@ -202,7 +202,7 @@ kongctl apply -f kongctl/phase-1-backend-only.yaml
 ```bash
 # Kafka brokers are no longer directly reachable by clients
 # Connect via the gateway instead
-kafkactl --bootstrap-server localhost:19092 get topics
+kafkactl get topics --context payment-rail-core
 ```
 
 **Talking point:**
@@ -308,7 +308,7 @@ kongctl apply -f kongctl/phase-2-virtual-clusters.yaml
 
 ```bash
 # Retail client — connects to port 19192 (Retail_Banking_NY)
-kafkactl --bootstrap-server localhost:19192 get topics
+kafkactl get topics --context retail-banking-ny
 ```
 
 Expected output (prefix hidden):
@@ -324,7 +324,7 @@ infosec.security.fraud.anomaly-pings.v1    ← infosec.security.fraud.anomaly-pi
 
 ```bash
 # Wealth client — connects to port 19292 (Wealth_Management_LA)
-kafkactl --bootstrap-server localhost:19292 get topics
+kafkactl get topics --context wealth-management-la
 ```
 
 Expected output:
@@ -402,14 +402,10 @@ kongctl apply -f kongctl/phase-3-auth.yaml
 
 ```bash
 # Anonymous access still works (for internal systems)
-kafkactl --bootstrap-server localhost:19292 get topics
+kafkactl get topics --context wealth-management-la
 
 # Wealth advisor authenticates with SASL/PLAIN
-kafkactl --bootstrap-server localhost:19292 \
-  --sasl-mechanism PLAIN \
-  --sasl-username wealth-advisors \
-  --sasl-password secret \
-  get topics
+kafkactl get topics --context wealth-advisors
 ```
 
 **Talking point:**
@@ -515,18 +511,13 @@ kongctl apply -f kongctl/phase-4-acls.yaml
 
 ```bash
 # Anonymous wealth client — infosec topics are blocked
-kafkactl --bootstrap-server localhost:19292 \
-  consume infosec.security.fraud.risk-scores.v3
+kafkactl consume infosec.security.fraud.risk-scores.v3 --context wealth-management-la
 # → TOPIC_AUTHORIZATION_FAILED
 ```
 
 ```bash
 # wealth-advisors principal — access granted by conditional ACL
-kafkactl --bootstrap-server localhost:19292 \
-  --sasl-mechanism PLAIN \
-  --sasl-username wealth-advisors \
-  --sasl-password secret \
-  consume infosec.security.fraud.risk-scores.v3
+kafkactl consume infosec.security.fraud.risk-scores.v3 --context wealth-advisors
 # → messages flow
 ```
 
@@ -624,17 +615,11 @@ kongctl apply -f kongctl/phase-5-policies.yaml
 
 ```bash
 # Produce a well-formed message — succeeds
-echo '{"score": 0.87, "account_id": "NW-001234", "reason": "velocity_spike", "evaluated_at": "2024-06-12T14:00:00Z"}' | \
-  kafkactl --bootstrap-server localhost:19292 \
-  --sasl-mechanism PLAIN --sasl-username wealth-advisors --sasl-password secret \
-  produce infosec.security.fraud.risk-scores.v3
+echo '{"score":0.87,"account_id":"NW-001234","reason":"velocity_spike","evaluated_at":"2026-06-12T14:32:45Z","metadata":{"model_version":"risk-v3.4.1","region":"us-east-1","alert_id":"ALRT-9f2c7d1b"}}' | kafkactl produce infosec.security.fraud.risk-scores.v3 --context wealth-advisors-schema
 
 # Produce a malformed message (score is a string, unknown field "acct", missing required fields)
 # — rejected at the gateway before reaching the broker
-echo '{"score": "HIGH", "acct": "NW-001234"}' | \
-  kafkactl --bootstrap-server localhost:19292 \
-  --sasl-mechanism PLAIN --sasl-username wealth-advisors --sasl-password secret \
-  produce infosec.security.fraud.risk-scores.v3
+echo '{"score": "HIGH", "acct": "NW-001234"}' | kafkactl produce infosec.security.fraud.risk-scores.v3 --context wealth-advisors-schema
 # → INVALID_RECORD — schema validation failed
 ```
 
@@ -705,21 +690,18 @@ echo '{
   "quantity": 500,
   "price_usd": 98.72,
   "settled_at": "2024-06-12T14:30:00Z"
-}' | kafkactl --bootstrap-server localhost:19092 \
-  produce nw.ledger.transactions.high-value-wire-transfers.v1
+}' | kafkactl produce nw.ledger.transactions.high-value-wire-transfers.v1 --context payment-rail-core
 ```
 
 Now read the raw bytes directly from Kafka (bypassing the gateway) to show the payload is encrypted:
 
 ```bash
 # Read raw from Kafka — payload is encrypted gibberish
-kafkactl --bootstrap-server kafka1:9092 \
-  consume nw.ledger.transactions.high-value-wire-transfers.v1 --from-beginning
+docker exec -it kafka_cluster-kafka1-1 /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server kafka1:9092 --topic nw.ledger.transactions.high-value-wire-transfers.v1 --from-beginning
 # → ÄxØ9...�ïþ (encrypted bytes — not readable)
 
 # Read through the gateway — decrypted transparently
-kafkactl --bootstrap-server localhost:19092 \
-  consume nw.ledger.transactions.high-value-wire-transfers.v1 --from-beginning
+kafkactl consume nw.ledger.transactions.high-value-wire-transfers.v1 --context payment-rail-core -b
 # → {"transaction_id": "TXN-20240612-001", "full_name": "Eleanor Hartwell", ...}
 ```
 
