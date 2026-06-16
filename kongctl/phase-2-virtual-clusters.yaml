@@ -16,13 +16,18 @@ _defaults:
     namespace: northwind
 
 event_gateways:
-  - ref: event-gateway
+  - ref: northwind-event-gateway
     name: northwind-event-gateway
     description: Northwind Financial MQ Environment
 
     backend_clusters:
       - ref: Northwind-Core-Event-Hub
         name: Northwind-Core-Event-Hub
+        labels:
+          env: production
+          role: source
+          tier: core
+          clearance: maximum
         authentication:
           type: anonymous
         bootstrap_servers:
@@ -34,6 +39,23 @@ event_gateways:
         insecure_allow_anonymous_virtual_cluster_auth: true
 
     listeners:
+      # Northwind Core — ports 19092–19190 (passthrough, present across all phases)
+      - ref: core-listener
+        name: core-listener
+        addresses: ["0.0.0.0"]
+        ports: ["19092-19190"]
+        policies:
+          - ref: forward-to-northwind-core
+            type: forward_to_virtual_cluster
+            name: forward-to-northwind-core
+            config:
+              type: port_mapping
+              destination:
+                id: !ref Northwind-Core
+              advertised_host: localhost
+              bootstrap_port: none
+              min_broker_id: 0
+
       # Retail Banking NY — ports 19192–19290
       - ref: retail-banking-ny-listener
         name: retail-banking-ny-listener
@@ -132,5 +154,23 @@ event_gateways:
                   - backend: nw.analytics.forecasting.market-weather.v1
               - type: glob
                 glob: "infosec.security.*"
+        authentication:
+          - type: anonymous
+
+      # ------------------------------------------------------------------
+      # Northwind-Core — flat passthrough, present across all phases
+      # ------------------------------------------------------------------
+      - ref: Northwind-Core
+        name: Northwind-Core
+        description: >-
+          Flat passthrough virtual cluster. Exposes all backend topics
+          without transformation. Runs alongside domain VCs across all phases.
+        destination:
+          id: !ref Northwind-Core-Event-Hub
+        acl_mode: passthrough
+        dns_label: northwind-core
+        labels:
+          env: production
+          tier: core
         authentication:
           - type: anonymous

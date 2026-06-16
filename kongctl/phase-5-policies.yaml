@@ -29,6 +29,11 @@ event_gateways:
     backend_clusters:
       - ref: Northwind-Core-Event-Hub
         name: Northwind-Core-Event-Hub
+        labels:
+          env: production
+          role: source
+          tier: core
+          clearance: maximum
         authentication:
           type: anonymous
         bootstrap_servers:
@@ -100,19 +105,20 @@ event_gateways:
               bootstrap_port: none
               min_broker_id: 0
 
-      # Payment Rail Core listener — ports 19092–19190
-      - ref: payment-rail-core-listener
-        name: payment-rail-core-listener
+      # Northwind Core — ports 19092–19190 (passthrough, present across all phases)
+      # In phase 5 this VC gains produce/consume policies for wire transfer encryption.
+      - ref: core-listener
+        name: core-listener
         addresses: ["0.0.0.0"]
         ports: ["19092-19190"]
         policies:
-          - ref: forward-to-payment-rail-core
+          - ref: forward-to-northwind-core
             type: forward_to_virtual_cluster
-            name: forward-to-payment-rail-core
+            name: forward-to-northwind-core
             config:
               type: port_mapping
               destination:
-                id: !ref payment-rail-core
+                id: !ref Northwind-Core
               advertised_host: localhost
               bootstrap_port: none
               min_broker_id: 0
@@ -124,6 +130,10 @@ event_gateways:
           id: !ref Northwind-Core-Event-Hub
         acl_mode: enforce_on_gateway
         dns_label: retail-banking-ny
+        labels:
+          env: production
+          location: new-york
+          segment: retail-banking
         namespace:
           mode: hide_prefix
           prefix: "RETAIL_NY."
@@ -174,6 +184,10 @@ event_gateways:
           id: !ref Northwind-Core-Event-Hub
         acl_mode: enforce_on_gateway
         dns_label: wealth-management-la
+        labels:
+          env: production
+          location: los-angeles
+          segment: wealth-management
         namespace:
           mode: hide_prefix
           prefix: "WEALTH_LA."
@@ -228,6 +242,15 @@ event_gateways:
                     - name: write
                   resource_names:
                     - match: "*"
+                - action: allow
+                  resource_type: group
+                  operations:
+                    - name: describe
+                    - name: read
+                    - name: write
+                    - name: create
+                  resource_names:
+                    - match: "*"
 
         # ------------------------------------------------------------------
         # Schema validation — rejects non-conformant fraud risk score events
@@ -253,18 +276,20 @@ event_gateways:
               value_validation_action: reject
 
       # ------------------------------------------------------------------
-      # Payment_Rail_Core — encrypt produce, decrypt consume
+      # Northwind-Core — flat passthrough, present across all phases
+      # Phase 5 adds produce/consume policies: encrypt + decrypt wire transfers
       # ACL mode passthrough: Kafka manages its own ACLs for this cluster
       # ------------------------------------------------------------------
-      - ref: payment-rail-core
-        name: payment-rail-core
+      - ref: Northwind-Core
+        name: Northwind-Core
         description: >-
-          Core payment rail — interbank settlement, treasury movement, clearing.
+          Flat passthrough virtual cluster — core payment rail in phase 5.
+          Interbank settlement, treasury movement, clearing.
           Highest operational controls. Wire transfer values encrypted at rest.
         destination:
           id: !ref Northwind-Core-Event-Hub
         acl_mode: passthrough
-        dns_label: payment-rail-core
+        dns_label: northwind-core
         labels:
           env: production
           location: primary-datacenter

@@ -202,7 +202,7 @@ kongctl apply -f kongctl/phase-1-backend-only.yaml
 ```bash
 # Kafka brokers are no longer directly reachable by clients
 # Connect via the gateway instead
-kafkactl get topics --context payment-rail-core
+kafkactl get topics --context northwind-core
 ```
 
 **Talking point:**
@@ -230,6 +230,22 @@ occasionally drift into Wealth topics because bootstrap servers are the same.
 ```yaml
 # kongctl/phase-2-virtual-clusters.yaml  (extends phase-1)
     listeners:
+      - ref: core-listener
+        name: core-listener
+        addresses: ["0.0.0.0"]
+        ports: ["19092-19190"]
+        policies:
+          - ref: forward-to-northwind-core
+            type: forward_to_virtual_cluster
+            name: forward-to-northwind-core
+            config:
+              type: port_mapping
+              destination:
+                id: !ref Northwind-Core
+              advertised_host: localhost
+              bootstrap_port: none
+              min_broker_id: 0
+
       - ref: retail-banking-ny-listener
         name: retail-banking-ny-listener
         addresses: ["0.0.0.0"]
@@ -264,10 +280,11 @@ occasionally drift into Wealth topics because bootstrap servers are the same.
 
     virtual_clusters:
       - ref: retail-banking-ny
-        name: Retail_Banking_NY
+        name: retail-banking-ny
         destination:
-          id: !ref backend-cluster
+          id: !ref Northwind-Core-Event-Hub
         acl_mode: passthrough           # ACLs added in the next scene
+        dns_label: retail-banking-ny
         namespace:
           mode: hide_prefix
           prefix: "RETAIL_NY."
@@ -282,10 +299,11 @@ occasionally drift into Wealth topics because bootstrap servers are the same.
           - type: anonymous
 
       - ref: wealth-management-la
-        name: Wealth_Management_LA
+        name: wealth-management-la
         destination:
-          id: !ref backend-cluster
+          id: !ref Northwind-Core-Event-Hub
         acl_mode: passthrough
+        dns_label: wealth-management-la
         namespace:
           mode: hide_prefix
           prefix: "WEALTH_LA."
@@ -298,6 +316,15 @@ occasionally drift into Wealth topics because bootstrap servers are the same.
                 glob: "infosec.security.*"
         authentication:
           - type: anonymous
+
+      - ref: Northwind-Core
+        name: Northwind-Core
+        destination:
+          id: !ref Northwind-Core-Event-Hub
+        acl_mode: passthrough
+        dns_label: northwind-core
+        authentication:
+          - type: anonymous
 ```
 
 ```bash
@@ -307,7 +334,7 @@ kongctl apply -f kongctl/phase-2-virtual-clusters.yaml
 ### Step 3b — Show the namespace magic
 
 ```bash
-# Retail client — connects to port 19192 (Retail_Banking_NY)
+# Retail client — connects to port 19192 (retail-banking-ny)
 kafkactl get topics --context retail-banking-ny
 ```
 
@@ -323,7 +350,7 @@ infosec.security.fraud.anomaly-pings.v1    ← infosec.security.fraud.anomaly-pi
 ```
 
 ```bash
-# Wealth client — connects to port 19292 (Wealth_Management_LA)
+# Wealth client — connects to port 19292 (wealth-management-la)
 kafkactl get topics --context wealth-management-la
 ```
 
@@ -444,7 +471,7 @@ and they can't express conditional logic — you either have access or you don't
         cluster_policies:
           - ref: acl-retail-banking-ny
             type: acls
-            name: acl_retail_banking_ny
+            name: acl-retail-banking-ny
             config:
               rules:
                 # Allow all topic operations by default
@@ -472,7 +499,7 @@ and they can't express conditional logic — you either have access or you don't
           # Policy for anonymous / non-advisor principals
           - ref: acl-wealth-management-la
             type: acls
-            name: acl_wealth_management_la
+            name: acl-wealth-management-la
             condition: "context.auth.principal.name != 'wealth-advisors'"
             config:
               rules:
@@ -491,7 +518,7 @@ and they can't express conditional logic — you either have access or you don't
           # Policy exclusively for the wealth-advisors principal
           - ref: acl-wealth-management-la-advisors
             type: acls
-            name: acl_wealth_management_la_advisors
+            name: acl-wealth-management-la-advisors
             condition: "context.auth.principal.name == 'wealth-advisors'"
             config:
               rules:
@@ -632,19 +659,19 @@ echo '{"score": "HIGH", "acct": "NW-001234"}' | kafkactl produce infosec.securit
 > virtual cluster can have different produce policies for different topics. You don't need
 > a separate cluster per compliance requirement."
 
-### Step 6b — Field-level encryption on wire transfers
+### Step 6c — Field-level encryption on wire transfers
 
-Wire transfers flow through the `Payment_Rail_Core` virtual cluster. The produce policy
+Wire transfers flow through the `Northwind-Core` virtual cluster. The produce policy
 encrypts the message value before it lands on the broker. The consume policy decrypts
 transparently on the way out.
 
 ```yaml
-# Added to payment-rail-core virtual cluster in phase-5-policies.yaml
+# Added to Northwind-Core virtual cluster in phase-5-policies.yaml
 
-      - ref: payment-rail-core
-        name: Payment_Rail_Core
+      - ref: Northwind-Core
+        name: Northwind-Core
         destination:
-          id: !ref backend-cluster
+          id: !ref Northwind-Core-Event-Hub
         acl_mode: passthrough
 
         produce_policies:
@@ -679,7 +706,7 @@ transparently on the way out.
 **Demonstrate encrypt/decrypt:**
 
 ```bash
-# Produce a wire transfer event through the gateway (port 19092 = Payment_Rail_Core)
+# Produce a wire transfer event through the gateway (port 19092 = Northwind-Core)
 echo '{
   "transaction_id": "TXN-20240612-001",
   "customer_id": "NW-C-88421",
@@ -690,7 +717,7 @@ echo '{
   "quantity": 500,
   "price_usd": 98.72,
   "settled_at": "2024-06-12T14:30:00Z"
-}' | kafkactl produce nw.ledger.transactions.high-value-wire-transfers.v1 --context payment-rail-core
+}' | kafkactl produce nw.ledger.transactions.high-value-wire-transfers.v1 --context northwind-core
 ```
 
 Now read the raw bytes directly from Kafka (bypassing the gateway) to show the payload is encrypted:
@@ -701,7 +728,7 @@ docker exec -it kafka_cluster-kafka1-1 /opt/kafka/bin/kafka-console-consumer.sh 
 # → ÄxØ9...�ïþ (encrypted bytes — not readable)
 
 # Read through the gateway — decrypted transparently
-kafkactl consume nw.ledger.transactions.high-value-wire-transfers.v1 --context payment-rail-core -b
+kafkactl consume nw.ledger.transactions.high-value-wire-transfers.v1 --context northwind-core -b
 # → {"transaction_id": "TXN-20240612-001", "full_name": "Eleanor Hartwell", ...}
 ```
 
@@ -763,7 +790,7 @@ That's the governance model we're proposing."
 
 **If the demo breaks:**
 - Fallback: `recordings/keg-demo-full.mp4` — full walkthrough pre-recorded
-- Have `event-gateway.yaml` open in the editor — walk through the config as a whiteboard
+- Have `kongctl/phase-5-policies.yaml` open in the editor — walk through the final config as a whiteboard
 
 **If a topic is missing:**
 ```bash
@@ -784,7 +811,6 @@ kafkactl create topic WEALTH_LA.infosec.security.fraud.risk-scores.v3 --partitio
 | `kongctl/phase-3-auth.yaml` | Scene 4: SASL/PLAIN termination |
 | `kongctl/phase-4-acls.yaml` | Scene 5: Gateway-enforced ACLs |
 | `kongctl/phase-5-policies.yaml` | Scene 6: Schema validation + encryption |
-| `kongctl/event-gateway.yaml` | Full final state (all phases combined) |
 | `kafka/config/topics.txt` | Topic list for initial setup |
 | `kafka/config/schemas/fraud_risk_scores.json` | JSON Schema for fraud risk scores — register in Apicurio before Scene 6 |
 | `kafka/config/schemas/high_value_wire_transfers.avsc` | Avro schema for wire transfer topic (reference) |
